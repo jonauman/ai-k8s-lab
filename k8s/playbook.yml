@@ -1,0 +1,211 @@
+---
+- name: Setup kubernetes
+  hosts: lan
+  remote_user: jonauman
+  become: true
+  vars:
+    CRIO_VERSION: v1.32
+    KUBERNETES_SINGLE_NODE: true
+    KUBERNETES_VERSION: v1.32 
+    POD_SUBNET: 10.244.0.0/16
+
+  tasks:
+    - name: Add cri-o repository
+      ansible.builtin.yum_repository:
+        name: CRI-O
+        description: CRI-O YUM repo
+        baseurl: https://download.opensuse.org/repositories/isv:/cri-o:/stable:/{{ CRIO_VERSION }}/rpm/
+        enabled: 1
+        gpgcheck: 1
+        gpgkey: https://download.opensuse.org/repositories/isv:/cri-o:/stable:/{{ CRIO_VERSION }}/rpm/repodata/repomd.xml.key
+
+    - name: install cri-o
+      ansible.builtin.command: rpm-ostree install -A -y --allow-inactive --idempotent cri-o
+
+    - name: check cri-o is in boot config
+      ansible.builtin.shell: rpm-ostree -b status | grep cri-o | wc -l
+      register: crio_rebooted
+
+    - name: reboot after cri-o install
+      ansible.builtin.reboot:
+      when: crio_rebooted.stdout == "0"
+
+    - name: enable crio service
+      ansible.builtin.service:
+        name: crio
+        state: started
+        enabled: yes
+
+    - name: fix crio network
+      ansible.builtin.blockinfile:
+        path: /etc/crio/crio.conf.d/10-crio.conf
+        insertafter: EOF
+        prepend_newline: true
+        block: |
+          [crio.network]
+          plugin_dir = "/usr/libexec/cni"
+      notify:
+        - restart crio
+     
+    - name: configure nvidia to work with crio
+      ansible.builtin.shell: nvidia-ctk runtime configure --runtime=crio
+  
+    - name: Add br_netfilter module
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+        persistent: present
+      loop:
+        - br_netfilter
+        - overlay
+
+    - ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        sysctl_set: true
+        state: present
+        reload: true
+      loop:
+        - net.ipv4.ip_forward
+        - net.bridge.bridge-nf-call-iptables
+        - net.bridge.bridge-nf-call-ip6tables
+
+    - name: Add kubernetes repository
+      ansible.builtin.yum_repository:
+        name: kubernetes
+        description: kubernetes yum repo
+        baseurl: "https://pkgs.k8s.io/core:/stable:/{{ KUBERNETES_VERSION }}/rpm/"
+        enabled: 1
+        gpgcheck: 1
+        repo_gpgcheck: 1
+        gpgkey: "https://pkgs.k8s.io/core:/stable:/{{ KUBERNETES_VERSION }}/rpm/repodata/repomd.xml.key"
+
+    - name: install kubernetes
+      ansible.builtin.command: rpm-ostree install -A -y --allow-inactive --idempotent kubelet kubeadm kubectl helm
+
+    - name: check kubernetes is in boot config
+      ansible.builtin.shell: rpm-ostree -b status | grep kubectl | wc -l
+      register: kubernetes_rebooted
+
+    - name: Remove a line from the Elasticsearch configuration
+      ansible.builtin.lineinfile:
+        path: /etc/systemd/zram-generator.conf
+        regexp: '^\[zram0\]'
+        state: absent
+
+    - name: reboot after kubernetes install
+      ansible.builtin.reboot:
+      when: kubernetes_rebooted.stdout == "0"
+
+    - name: enabled kubelet service
+      ansible.builtin.service:
+        name: kubelet
+        state: started
+        enabled: yes
+
+    - name: ensure kubernetes uses correct cgroup driver
+      ansible.builtin.lineinfile:
+        path: /etc/sysconfig/kubelet
+        insertafter: EOF
+        line: KUBELET_EXTRA_ARGS=--cgroup-driver=systemd
+
+    - name: get full kubernetes version
+      ansible.builtin.shell: kubeadm version|grep -o GitVersion[^,]*|cut -d '"' -f2
+      register: kube_full_version
+
+    - name: create kubernetes clusterconfig.yaml
+      ansible.builtin.template:
+        src: clusterconfig.j2
+        dest: /root/clusterconfig.yml
+
+    - name: check if kubernetes initialtised
+      ansible.builtin.shell: netstat -na|grep :::10250|wc -l
+      register: kubernetes_initialised
+
+    - name: initialise kubernetes cluster
+      ansible.builtin.command: kubeadm init --config clusterconfig.yml
+      args:
+        chdir: /root
+      register: init_kubernetes
+      when: kubernetes_initialised.stdout == "0"
+
+    - name: show kubernetes init output
+      ansible.builtin.debug:
+        msg: "{{ init_kubernetes.stdout_lines }}"
+      when: kubernetes_initialised.stdout == "0"
+
+    - name: show cluster info
+      ansible.builtin.command: kubectl cluster-info
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: kubectl_cluster_info
+
+    - name: show kubernetes init output
+      ansible.builtin.debug: 
+        msg: "{{ kubectl_cluster_info.stdout_lines }}"
+ 
+    - name: check if single node tainted
+      ansible.builtin.shell: kubectl get nodes localhost.localdomain -o custom-columns=NAME:.metadata.name,TAINTS:.spec.taints --no-headers | grep "<none>" | wc -l
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: kubernetes_taint_off
+
+    - name: run single node kubernetes cluster
+      ansible.builtin.command: kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: (KUBERNETES_SINGLE_NODE|default(false)|bool == true) and (kubernetes_taint_off.stdout == "0")
+
+    - name: install flannel networking
+      ansible.builtin.command: kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/refs/heads/master/Documentation/kube-flannel.yml
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: install nvidia gpu operator
+      ansible.builtin.shell: |
+        kubectl create ns gpu-operator
+        kubectl label --overwrite ns gpu-operator pod-security.kubernetes.io/enforce=privileged
+        helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
+        helm repo update
+        helm install --wait --generate-name \
+          -n gpu-operator --create-namespace \
+          nvidia/gpu-operator \
+          --version=v25.3.4 \
+          --set cdi.enabled=true \
+          --set cdi.default=true \
+          --set driver.enabled=false
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: patch nvidia gpu operator daemonset
+      ansible.builtin.shell: |
+        kubectl -n gpu-operator \
+          patch daemonset nvidia-container-toolkit-daemonset \
+          --type='json' \
+          -p='[{"op": "replace", "path": "/spec/template/spec/volumes/6/hostPath/path", "value": "/etc/containers/oci/hooks.d"}]'
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: get nvidia gpu operator validator pod
+      ansible.builtin.shell: |
+        kubectl -n gpu-operator \
+          get pods \
+          -l app=nvidia-operator-validator \
+          -o name
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: nvidia_validator_pod
+
+    - name: restart nvidia gpu operator validator pod
+      ansible.builtin.shell: |
+        kubectl -n gpu-operator \
+          delete pod/{{ nvidia_validator_pod.stdout }}
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      when: nvidia_validator_pod.stdout != ""
+
+  handlers:
+    - name: restart crio
+      ansible.builtin.service:
+        name: crio
+        state: restarted

@@ -1,0 +1,55 @@
+{
+  "ignition": {
+    "config": {},
+    "timeouts": {},
+    "version": "3.3.0"
+  },
+  "passwd": {
+    "users": [
+      {
+        "name": "coreadmin",
+        "homeDir": "/home/coreadmin",
+        "groups": [
+          "wheel",
+          "sudo"
+        ],
+        "passwordHash": "$6$jvG3hCOQL/a3yW/4$r/vwpCbM/gXSZQ0KV.KnjDhlHc/Q4uYtA8C4jrMUmLjxNkuCEXJBC2P7fQbBgFB475Ou/nQZ8xkNcztYUunAI/",
+        "shell": "/bin/bash",
+        "sshAuthorizedKeys": [
+          "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDnh6c8MhALANaU5OyeuJMtWV4BzqzqqyRzCT065KAfzAirBY8YLfuRsYDEiN1Ld0wOP00+LATRZfHSc7xdCfAY1tXVUNM1PKWLWSXQXSbyd/uOmvfc7ca7NyXG9wO36hzjCkGLsCQjj8LrdqEMsGypkoY+ggaeNyaJP/yv/GB68jzvA3z5aUOV8SEfPrWsN0bePtMWyGBEVJZCnvOoFOu92uJcEa8/rx0VY8fOOrwaAPogGSPecr9YylCd0rDDLAxc5RX8bH8ESAh4UZGEqVlSgKu/7b0mfPHjJdgeukAsxe0R7KSh4LR2Y5mLSlyyV4be/FQieQesFqmm6hFJOl7aw7+1C5gqHK37gfmSVl/wCmR2S0Kg0oU7V3gFBbI3ejzajSSqXGfvSYNHeLhVn3ZgrZB05EeuOi4dn46FOy98L7EFImM61dJrdZ56Etbo0cXMobfkYFEfFSvAvGQsY/ZyZQmNi5Uaq+k7xUWn50BJMJBnyhB1IXV86xC9LfaF4rs= jonauman@Jons-MacBook-Pro.local"
+        ]
+      }
+    ]
+  },
+  "storage": {
+    "directories": [
+      {
+        "path": "/etc/ucore-autorebase",
+        "mode": 754
+      }
+    ],
+    "files": [
+      {
+        "path": "/etc/vconsole.conf",
+        "mode": 420,
+        "contents": {
+          "source": "data:,KEYMAP%3Dgb"
+        }
+      }
+    ]
+  },
+  "systemd": {
+    "units": [
+      {
+        "name": "ucore-unsigned-autorebase.service",
+        "enabled": true,
+        "contents": "[Unit]\nDescription=uCore autorebase to unsigned OCI and reboot\nConditionPathExists=!/etc/ucore-autorebase/unverified\nConditionPathExists=!/etc/ucore-autorebase/signed\nAfter=network-online.target\nWants=network-online.target\n[Service]\nType=oneshot\nStandardOutput=journal+console\nExecStart=/usr/bin/rpm-ostree rebase --bypass-driver ostree-unverified-registry:ghcr.io/ublue-os/ucore:stable-nvidia\nExecStart=/usr/bin/touch /etc/ucore-autorebase/unverified\nExecStart=/usr/bin/systemctl disable ucore-unsigned-autorebase.service\nExecStart=/usr/bin/systemctl reboot\n[Install]\nWantedBy=multi-user.target\n"
+      },
+      {
+        "name": "ucore-signed-autorebase.service",
+        "enabled": true,
+        "contents": "[Unit]\nDescription=uCore autorebase to signed OCI and reboot\nConditionPathExists=/etc/ucore-autorebase/unverified\nConditionPathExists=!/etc/ucore-autorebase/signed\nAfter=network-online.target\nWants=network-online.target\n[Service]\nType=oneshot\nStandardOutput=journal+console\nExecStart=/usr/bin/rpm-ostree rebase --bypass-driver ostree-image-signed:docker://ghcr.io/ublue-os/ucore:stable-nvidia\nExecStart=/usr/bin/touch /etc/ucore-autorebase/signed\nExecStart=/usr/bin/systemctl disable ucore-signed-autorebase.service\nExecStart=/usr/bin/systemctl reboot\n[Install]\nWantedBy=multi-user.target\n"
+      }
+    ]
+  }
+}

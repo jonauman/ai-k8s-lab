@@ -1,0 +1,14 @@
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+kubernetesVersion: {{ kube_full_version.stdout }}
+controllerManager:
+  extraArgs:
+    flex-volume-plugin-dir: "/etc/kubernetes/kubelet-plugins/volume/exec"
+networking:
+  podSubnet: {{ POD_SUBNET }}
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: InitConfiguration
+nodeRegistration:
+  criSocket: unix:///var/run/crio/crio.sock
